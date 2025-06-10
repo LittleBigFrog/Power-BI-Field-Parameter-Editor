@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Power BI Field Parameter Editor</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+        }
+        
+        textarea {
+            width: 100%;
+            min-height: 200px;
+            padding: 15px;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+        
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 14px;
+            background: #28a745;
+            color: white;
+            margin-top: 20px;
+            width: 100%;
+        }
+        
+        button:hover {
+            background: #218838;
+        }
+        
+        .status {
+            padding: 10px 15px;
+            border-radius: 6px;
+            margin-top: 15px;
+            font-weight: 500;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        hr {
+            border: none;
+            border-top: 2px solid #dee2e6;
+            margin: 40px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Power BI Field Parameter Editor</h1>
+        
+        <label for="daxInput">Field Parameter Code:</label>
+        <textarea id="daxInput" placeholder="Paste your Power BI field parameter code here">MonthParameter = {
+    ("Months" & "BYY", NAMEOF('Dates'[Month]), 0,,), -- This is a comment
+    // Another comment on its own line
+    ("bibi" & UNICHAR(10) & "wouah", NAMEOF([BlankDimension]), 2,,),
+    ("Simple Text", NAMEOF([BlankDimension]), 1, "More,Data", "Final")
+}</textarea>
+        
+        <button onclick="copyToClipboard()">Copy for Excel</button>
+        
+        <div id="status"></div>
+        
+        <hr style="margin: 40px 0; border: 1px solid #dee2e6;">
+        
+        <label for="excelInput">Excel Data (paste from Excel):</label>
+        <textarea id="excelInput" placeholder="Paste your updated data from Excel here (tab-separated)"></textarea>
+        
+        <button onclick="copyForPowerBI()">Copy for Power BI</button>
+        <button onclick="resetOrderAndCopyForPowerBI()">Reset Order and Copy for Power BI</button>
+        
+        <div id="status2"></div>
+    </div>
+
+    <script>
+        function showStatus(message, type) {
+            document.getElementById('status').innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+
+        function showStatus2(message, type) {
+            document.getElementById('status2').innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+
+        function parseDAX(daxCode) {
+            let parameterName = '';
+            const equalIndex = daxCode.indexOf('=');
+            if (equalIndex > -1) {
+                const beforeEqual = daxCode.substring(0, equalIndex).trim();
+                const words = beforeEqual.split(/\s+/);
+                parameterName = words[words.length - 1];
+            }
+            
+            const braceStart = daxCode.indexOf('{');
+            const braceEnd = daxCode.lastIndexOf('}');
+            if (braceStart === -1 || braceEnd === -1) {
+                throw new Error('Could not find field parameter definition');
+            }
+            
+            const content = daxCode.substring(braceStart + 1, braceEnd);
+            const lines = content.split('\n');
+            const rows = [];
+            
+            for (let i = 0; i < lines.length; i++) {
+                let line = lines[i];
+
+                // ** NEW: Handle DAX comments (-- and //) **
+                // This logic is simple and assumes comments aren't inside string literals.
+                const slashIndex = line.indexOf('//');
+                const dashIndex = line.indexOf('--');
+                let commentIndex = -1;
+
+                if (slashIndex !== -1 && dashIndex !== -1) {
+                    commentIndex = Math.min(slashIndex, dashIndex);
+                } else if (slashIndex !== -1) {
+                    commentIndex = slashIndex;
+                } else {
+                    commentIndex = dashIndex;
+                }
+                
+                if (commentIndex !== -1) {
+                    line = line.substring(0, commentIndex);
+                }
+                
+                const cleanLine = line.trim().replace(/,$/, '');
+                if (!cleanLine || !cleanLine.includes('(')) continue;
+                
+                const tupleMatch = cleanLine.match(/\((.*)\)/);
+                if (!tupleMatch) continue;
+                
+                const tupleContent = tupleMatch[1];
+                const values = [];
+                let current = '';
+                let inDoubleQuotes = false;
+                let inSingleQuotes = false;
+                let parenLevel = 0;
+                let bracketLevel = 0;
+                
+                for (let j = 0; j < tupleContent.length; j++) {
+                    const char = tupleContent[j];
+                    if (char === '"') { inDoubleQuotes = !inDoubleQuotes; }
+                    else if (char === "'") { inSingleQuotes = !inSingleQuotes; }
+                    
+                    if (!inDoubleQuotes && !inSingleQuotes) {
+                        if (char === '(') parenLevel++;
+                        else if (char === ')') parenLevel--;
+                        else if (char === '[') bracketLevel++;
+                        else if (char === ']') bracketLevel--;
+                        
+                        if (char === ',' && parenLevel === 0 && bracketLevel === 0) {
+                            values.push(current.trim());
+                            current = '';
+                        } else {
+                            current += char;
+                        }
+                    } else {
+                        current += char;
+                    }
+                }
+                values.push(current.trim());
+                
+                const cleanValues = values.map(val => {
+                    if (val === '' || val.toUpperCase() === 'BLANK()') return '';
+                    
+                    const isSimpleQuotedString = val.startsWith('"') && val.endsWith('"') && val.split('"').length === 3;
+                    if (isSimpleQuotedString) {
+                        return val.slice(1, -1);
+                    }
+                    return val;
+                });
+                
+                if (cleanValues.length > 0) {
+                    rows.push(cleanValues);
+                }
+            }
+            
+            if (rows.length === 0) {
+                throw new Error('No valid field parameter tuples found');
+            }
+            
+            return { parameterName: parameterName, rows: rows };
+        }
+
+        function formatForExcelCell(value) {
+            const strValue = String(value); 
+            
+            if (strValue.includes('"') || strValue.includes('\t') || strValue.includes('\n')) {
+                const escapedValue = strValue.replace(/"/g, '""');
+                return `"${escapedValue}"`;
+            }
+            
+            return strValue;
+        }
+
+        function copyToClipboard() {
+            const daxInput = document.getElementById('daxInput').value.trim();
+            if (!daxInput) {
+                showStatus('Please enter field parameter code', 'error');
+                return;
+            }
+            
+            try {
+                const result = parseDAX(daxInput);
+                const { rows, parameterName = 'Parameter' } = result;
+                
+                let maxCols = 0;
+                rows.forEach(row => { maxCols = Math.max(maxCols, row.length); });
+                
+                const headers = [];
+                if (maxCols >= 1) headers.push(parameterName);
+                if (maxCols >= 2) headers.push(parameterName + ' Fields');
+                if (maxCols >= 3) headers.push(parameterName + ' Order');
+                for (let i = 4; i <= maxCols; i++) {
+                    headers.push('Value ' + i);
+                }
+                
+                const allRows = [headers, ...rows];
+                
+                const tabularData = allRows.map(row => {
+                    const paddedRow = [...row];
+                    while (paddedRow.length < maxCols) {
+                        paddedRow.push('');
+                    }
+                    return paddedRow.map(formatForExcelCell).join('\t');
+                }).join('\n');
+
+                navigator.clipboard.writeText(tabularData).then(() => {
+                    showStatus(`Successfully copied ${rows.length} field parameter entries to clipboard! You can now paste it into Excel.`, 'success');
+                }).catch(err => {
+                    showStatus('Failed to copy: ' + err, 'error');
+                });
+                
+            } catch (error) {
+                showStatus('Error: ' + error.message, 'error');
+            }
+        }
+
+        function parseExcelData(excelData) {
+            const lines = excelData.trim().split('\n');
+            if (lines.length < 2) {
+                throw new Error('Excel data must have at least a header row and one data row');
+            }
+            
+            const headerCells = lines[0].split('\t');
+            const parameterName = headerCells[0].replace(/"/g, '').trim();
+            if (!parameterName) {
+                throw new Error('Could not extract field parameter name from first column header');
+            }
+            
+            const dataRows = [];
+            for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                
+                const cells = line.split('\t').map(cell => {
+                    if (cell.startsWith('"') && cell.endsWith('"')) {
+                        const innerContent = cell.slice(1, -1);
+                        if (innerContent.replace(/""/g, '').includes('"')) {
+                            return cell; 
+                        } else {
+                            return innerContent.replace(/""/g, '"');
+                        }
+                    }
+                    return cell;
+                });
+                dataRows.push(cells);
+            }
+            
+            if (dataRows.length === 0) {
+                throw new Error('No data rows found');
+            }
+            
+            return { parameterName, rows: dataRows };
+        }
+
+        function formatValueForDAX(value) {
+            let val = value.trim();
+            if (!val) {
+                return 'BLANK()';
+            }
+            
+            const isNumeric = !isNaN(val) && !isNaN(parseFloat(val));
+            const looksLikeFunction = /^[a-z_][a-z0-9_]*\s*\(/i.test(val);
+            const isComplexExpression = val.includes('&') || val.startsWith('"');
+            
+            if (isNumeric || looksLikeFunction || isComplexExpression) {
+                return val; 
+            }
+            
+            return `"${val}"`;
+        }
+
+        function processAndCopyToPowerBI(resetOrder = false) {
+            const excelInput = document.getElementById('excelInput').value.trim();
+            if (!excelInput) {
+                showStatus2('Please paste Excel data', 'error');
+                return;
+            }
+            
+            try {
+                const result = parseExcelData(excelInput);
+                const { parameterName, rows } = result;
+                
+                if (resetOrder) {
+                    for (let i = 0; i < rows.length; i++) {
+                        if (rows[i].length >= 3) {
+                            rows[i][2] = i.toString();
+                        }
+                    }
+                }
+                
+                let maxCols = 0;
+                rows.forEach(row => { maxCols = Math.max(maxCols, row.length); });
+                
+                rows.forEach(row => {
+                    while (row.length < maxCols) {
+                        row.push(''); 
+                    }
+                });
+                
+                let daxCode = `${parameterName} = {\n`;
+                const daxRows = rows.map(row => {
+                    const formattedValues = row.map(cell => formatValueForDAX(cell));
+                    return `    (${formattedValues.join(', ')})`;
+                });
+                
+                daxCode += daxRows.join(',\n');
+                daxCode += '\n}';
+                
+                navigator.clipboard.writeText(daxCode).then(() => {
+                    const message = resetOrder 
+                        ? `Successfully copied field parameter with ${rows.length} entries and reset order column to clipboard!`
+                        : `Successfully copied field parameter with ${rows.length} entries to clipboard!`;
+                    showStatus2(message + ' You can now paste it into Power BI.', 'success');
+                }).catch(err => {
+                    showStatus2('Failed to copy: ' + err, 'error');
+                });
+                
+            } catch (error) {
+                showStatus2('Error: ' + error.message, 'error');
+            }
+        }
+        
+        function copyForPowerBI() {
+            processAndCopyToPowerBI(false);
+        }
+
+        function resetOrderAndCopyForPowerBI() {
+            processAndCopyToPowerBI(true);
+        }
+    </script>
+</body>
+</html>
